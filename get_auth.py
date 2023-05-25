@@ -13,14 +13,16 @@ mydb = mysql.connector.connect(
 )
 
 mycursor = mydb.cursor()
+mycursor.execute("DROP DATABASE IF EXISTS UserPermission")
 mycursor.execute("create database if not exists UserPermission")
 mycursor.execute("use UserPermission")
 mycursor.execute("create table if not exists user (id int primary key auto_increment, name varchar(255), user_type varchar(255))")
 mycursor.execute("create table if not exists permission(id int primary key auto_increment, code varchar(255) , name varchar(255))")
-mycursor.execute("create table if not exists _permission (id int primary key auto_increment,path varchar(255), permission_id int, user_id int, foreign key (user_id) references user(id), foreign key (permission_id) references permission(id))")
+mycursor.execute("create table if not exists _permission (id int primary key auto_increment,path varchar(255), object_type varchar(255), inheritance_enabled varchar(255), permission_id int, user_id int, foreign key (user_id) references user(id), foreign key (permission_id) references permission(id))")
 
 user_cache = {}
 permission_cache = {}
+
 PERMISSIONS_MAP = {
     2032127: 'Full Control',
     1245631: 'Modify',
@@ -41,18 +43,12 @@ PERMISSIONS_MAP = {
 
 }
 
-def is_inherited(file_path):
-    try:
-        sd = win32security.GetNamedSecurityInfo(file_path, win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION | win32security.UNPROTECTED_DACL_SECURITY_INFORMATION)
-        control, revision = sd.GetSecurityDescriptorControl()
-        if control & win32security.SE_DACL_PROTECTED:
-            return True
-        else:
-            return False
-    except Exception as e:
-        print(f"Error while checking inheritance for {file_path}: {str(e)}")
-        return None
-
+def is_inherited(directory_path,user):
+    root_permissions = get_permissions(directory_path)
+    if user not in root_permissions:
+        return 'Non'
+    else:
+        return 'Oui'
 
 
 def insert_user(user_name, user_type):
@@ -91,9 +87,9 @@ def insert_permission(permission,permission_name):
 
     return permission_id
 
-def insert_user_permission(path, permission_id, user_id):
-    sql = "insert into _permission (path, permission_id, user_id) values (%s, %s, %s)"
-    val = (path, permission_id, user_id)
+def insert_user_permission(path, object_type, inheritance_enabled, permission_id, user_id):
+    sql = "insert into _permission (path, object_type, inheritance_enabled, permission_id, user_id) values (%s, %s, %s, %s, %s)"
+    val = (path, object_type, inheritance_enabled, permission_id, user_id)
     mycursor.execute(sql, val)
 
 
@@ -102,26 +98,22 @@ def get_permissions(file_path):
     try:
         security_descriptor = win32security.GetFileSecurity(file_path, win32security.DACL_SECURITY_INFORMATION)
         dacl = security_descriptor.GetSecurityDescriptorDacl()
-
-        permissions = []
-        if dacl is not None and not is_inherited('C:\\'):
+        permissions = {}
+        if dacl is not None:
             for i in range(dacl.GetAceCount()):
                 ace = dacl.GetAce(i)
                 rev, permission, usersid = ace
                 user, domain, type = win32security.LookupAccountSid(None, usersid)
                 user_type = get_type_user(type)
-               
-               
+                user_key = domain + '\\' + user
                 permission_name = convert_to_readable_permission(permission)
-                permissions.append((domain + '\\' + user, permission, permission_name, user_type))
-        
+                permissions[user_key] = (permission, permission_name, user_type)
         return permissions
-
     except Exception as e:
         print(f"Error while retrieving permissions for {file_path}: {str(e)}")
-        return []
+        return {}
 
-# other parts of your code
+
 
 
 def get_type_user(type):
@@ -142,23 +134,26 @@ def convert_to_readable_permission(permission):
         return 'Other'
 
 
+
 def walk_directory(directory_path):
     for foldername, subfolders, filenames in os.walk(directory_path):
         for filename in filenames:
             file_path = os.path.join(foldername, filename)
             permissions = get_permissions(file_path)
-            for user, permission, permission_name, user_type in permissions:
+            for user, (permission, permission_name, user_type) in permissions.items():
+                
                 user_id = insert_user(user, user_type)
                 permission_id = insert_permission(permission, permission_name)
-                insert_user_permission(file_path, permission_id, user_id)
-                
+                insert_user_permission(file_path, 'file', is_inherited(directory_path,user), permission_id, user_id)
+
         for subfolder in subfolders:
             folder_path = os.path.join(foldername, subfolder)
             permissions = get_permissions(folder_path)
-            for user, permission, permission_name, user_type in permissions:
+            for user, (permission, permission_name, user_type) in permissions.items():
                 user_id = insert_user(user, user_type)
                 permission_id = insert_permission(permission, permission_name)
-                insert_user_permission(folder_path, permission_id, user_id)
+                insert_user_permission(folder_path, 'directory', is_inherited(directory_path,user), permission_id, user_id)
+		   
             print (folder_path)
 
 if __name__ == "__main__":
